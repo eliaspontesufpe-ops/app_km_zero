@@ -56,8 +56,6 @@ git remote add origin https://github.com/SEU_USUARIO/SEU_REPOSITORIO.git
 git push -u origin main
 ```
 
-Substitua `SEU_USUARIO/SEU_REPOSITORIO` pela identificação do repositório criado. Não inclua `volanchar.db`, credenciais ou dados pessoais.
-
 ## Funcionalidades incluídas
 
 - Cadastro e login por e-mail/senha, com senha derivada via PBKDF2-HMAC-SHA256 e salt aleatório.
