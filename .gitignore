@@ -1,9 +1,35 @@
-__pycache__/
-*.py[cod]
-*.db
+
+# Credenciais e arquivos privados
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.keystore
+*.jks
+
+# Python
+__pycache__/
+*.pyc
 .venv/
 venv/
-.DS_Store
-.vscode/
+
+# Compilação Android
+.buildozer/
+bin/
+
+# Arquivos do sistema e editores
 .idea/
+.vscode/
+*.log
+*:Zone.Identifier
+
+# Bancos locais e backups
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+
+# Arquivos enviados pelos usuários
+uploads/
+
