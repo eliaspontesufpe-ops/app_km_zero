@@ -1,1 +1,0 @@
-# Aplicativo e testes usam somente a biblioteca padrão do Python.
