@@ -1,4 +1,4 @@
-# VôLanchar 🍔
+# VôLanchar
 
 **O lanche pertim. O bucho chein.**
 
