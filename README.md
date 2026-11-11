@@ -1,78 +1,105 @@
-# VôLanchar / 0KM — MVP em Python
+# VôLanchar 🍔
 
-Aplicativo web responsivo para conectar compradores e vendedores no mesmo campus. Feito em Python, com servidor HTTP e banco SQLite da biblioteca padrão: não exige frameworks nem serviços externos para executar localmente.
+**O lanche pertim. O bucho chein.**
 
-## Requisitos
+O **VôLanchar** é um aplicativo Android que aproxima quem vende e quem procura lanches no ambiente universitário. A plataforma facilita a divulgação de produtos, a localização de vendedores nos pontos de venda e a organização dos pedidos, com contato direto pelo WhatsApp.
 
-- Python 3.10 ou superior.
-- Navegador moderno.
-- Nenhuma dependência externa (o `requirements.txt` existe para facilitar automações de repositórios Python).
+Desenvolvido como projeto acadêmico por estudantes da **Universidade Federal Rural de Pernambuco (UFRPE)**, o aplicativo busca tornar mais simples a conexão entre vendedores e a comunidade universitária.
 
-## Executar localmente
+## Funcionalidades
 
-```bash
-git clone <URL_DO_SEU_REPOSITORIO>
-cd volanchar_0km
-python app.py
+### Para quem compra
+
+- Criar uma conta e entrar com e-mail ou telefone e senha.
+- Encontrar vendedores e consultar os pontos de venda cadastrados.
+- Visualizar produtos, descrições e preços.
+- Adicionar itens ao carrinho e consultar o valor total.
+- Encaminhar o pedido ao vendedor pelo WhatsApp.
+
+### Para quem vende
+
+- Alternar para o perfil de vendedor.
+- Informar o ponto de venda e o contato de WhatsApp.
+- Indicar a disponibilidade com a opção **“Vendendo agora”**.
+- Cadastrar produtos com nome, descrição, preço e foto opcional.
+- Editar, pausar, reativar ou excluir produtos do cardápio.
+
+### Gerenciamento de conta
+
+- Atualizar informações do perfil.
+- Solicitar recuperação de acesso por e-mail.
+
+## Como funciona
+
+1. **Encontre:** consulte os pontos de venda e os vendedores disponíveis.
+2. **Escolha:** veja o cardápio e adicione produtos ao carrinho.
+3. **Peça:** confira o pedido e encaminhe os detalhes ao vendedor pelo WhatsApp.
+
+O VôLanchar **não realiza pagamentos dentro do aplicativo**. A combinação de pagamento e retirada é feita diretamente entre comprador e vendedor.
+
+## Instalação
+
+O VôLanchar está em desenvolvimento e dispõe de uma versão de testes para **Android (ARM64)**.
+
+Para instalar o aplicativo:
+
+1. Baixe o APK disponibilizado na área de [Releases deste repositório](https://github.com/eliaspontesufpe-ops/app_km_zero/releases), quando houver uma versão publicada.
+2. Abra o arquivo no dispositivo Android.
+3. Caso o Android solicite, permita a instalação de aplicativos dessa origem.
+4. Abra o VôLanchar e conecte-se à internet para utilizar os recursos disponíveis.
+
+> **Observação:** trata-se de uma versão de testes. Algumas funcionalidades podem apresentar limitações ou mudanças durante o desenvolvimento.
+
+## Tecnologias utilizadas
+
+| Componente | Tecnologia |
+| --- | --- |
+| Aplicativo Android | Python e Kivy |
+| Compilação Android | Buildozer e python-for-android |
+| API | Python e Flask |
+| Hospedagem da API | Render |
+| Banco de dados | TiDB Cloud (compatível com MySQL) |
+| Comunicação | HTTPS |
+| Contato para pedidos | WhatsApp |
+
+O aplicativo se comunica pela internet com uma API Flask, responsável pelo processamento das operações e pelo acesso aos dados armazenados na nuvem.
+
+## Estrutura do projeto
+
+```text
+app_km_zero/
+├── app/                 # Código do aplicativo Android
+├── backend/             # API e dependências do servidor
+├── docs/                # Requisitos e documentação de testes
+├── README.md            # Apresentação e instruções
+├── LICENSE              # Licença do projeto
+└── .gitignore           # Arquivos excluídos do versionamento
 ```
 
-Abra `http://127.0.0.1:8000`. O banco `volanchar.db` é criado na primeira execução e não deve ser enviado ao GitHub.
+A estrutura e os arquivos disponíveis podem evoluir conforme o desenvolvimento.
 
-Para configurar host, porta ou banco, use `VOLANCHAR_HOST`, `VOLANCHAR_PORT` e `VOLANCHAR_DB`.
+## Documentação
 
-Linux/macOS:
+A pasta [`docs/`](docs/) reúne os documentos técnicos do projeto, incluindo a especificação de requisitos e o plano de teste.
 
-```bash
-VOLANCHAR_PORT=8080 python app.py
-```
+## Estado de desenvolvimento
 
-Windows PowerShell:
+O VôLanchar encontra-se em fase de **MVP (produto mínimo viável)**, na versão **0.5.0**. O aplicativo já contempla o fluxo principal de consulta a vendedores, escolha de produtos e encaminhamento de pedidos.
 
-```powershell
-$env:VOLANCHAR_PORT="8080"
-python app.py
-```
+O acesso com Google ainda está em validação. A disponibilidade e o tempo de resposta do serviço podem variar, especialmente após períodos de inatividade da hospedagem.
 
-## Testes
+## Desenvolvedores
 
-```bash
-python -m unittest -v
-```
+Projeto desenvolvido por:
 
-Os testes usam um banco temporário e cobrem cadastro/login, alternância de perfil, presença, produtos e visibilidade das ofertas.
+- Alceu Domingues Alves
+- Elias Pontes Junior
+- Jeniffer Cavalcanti de Oliveira
+- Sérgio Ricardo Ferreira da Silva Filho
+- Wilber Antonio Santos da Silva
 
-## Publicar no GitHub
-
-1. Crie um repositório vazio no GitHub.
-2. Extraia o pacote baixado e abra o terminal dentro da pasta do projeto.
-3. Execute:
-
-```bash
-git init
-git add .
-git commit -m "Adiciona MVP VôLanchar 0KM"
-git branch -M main
-git remote add origin https://github.com/SEU_USUARIO/SEU_REPOSITORIO.git
-git push -u origin main
-```
-
-## Funcionalidades incluídas
-
-- Cadastro e login por e-mail/senha, com senha derivada via PBKDF2-HMAC-SHA256 e salt aleatório.
-- Alternância entre comprador e vendedor.
-- Seleção de pontos/blocos do campus.
-- Perfil do vendedor com ponto, WhatsApp e estado “Vendendo agora”.
-- Cadastro, pausa, reativação e exclusão de produtos.
-- Descoberta de vendedores ativos e catálogo por ponto.
-- Carrinho de um vendedor por vez e encaminhamento do pedido pelo WhatsApp.
-- Interface responsiva em português.
-
-## Limites e segurança
-
-Os pontos iniciais (“Entrada principal”, “Biblioteca”, “Centro de convivência”, “Bloco de aulas” e “Restaurante universitário”) são demonstrativos; substitua pela lista oficial do campus antes de implantar. Não há mapa/GPS, pagamento, entrega, avaliações, histórico, favoritos, chat interno nem login Google.
-
-As sessões ficam em memória e terminam quando o servidor reinicia; os cadastros e produtos permanecem no SQLite. Este servidor é destinado a MVP e demonstração local, não à exposição pública sem endurecimento. Antes de implantação pública, configure HTTPS, política de privacidade/LGPD, backup, gestão de segredos, limitação de requisições, recuperação de conta e autenticação persistente/gerenciada.
+**Universidade Federal Rural de Pernambuco (UFRPE)**
 
 ## Licença
 
-Licenciado sob MIT. Consulte `LICENSE`.
+O código está disponibilizado conforme os termos do arquivo [LICENSE](LICENSE). Consulte esse documento para conhecer as condições de uso, distribuição e atribuição de autoria.
