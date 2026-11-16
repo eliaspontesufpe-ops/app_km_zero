@@ -1,6 +1,4 @@
-"""API de demonstração VôLanchar: Python + Flask + MySQL.
-Não publicar na internet sem HTTPS, rate limiting, backup e revisão de segurança.
-"""
+"""API Flask do VôLanchar com autenticação, ofertas, pedidos e fotos persistentes."""
 import base64
 import binascii
 import datetime as dt
@@ -13,6 +11,7 @@ import smtplib
 from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
+from io import BytesIO
 
 from dotenv import load_dotenv
 from flask import Flask, g, jsonify, request, send_file, abort
@@ -347,11 +346,27 @@ def change_password():
     return answer({'ok':True,'mensagem':'Senha alterada. Entre novamente.'})
 
 
+PONTOS_CAMPUS = (
+    'CEGEN',
+    'RU',
+    'Reitoria',
+    'Biblioteca Central',
+    'CEGOE',
+    'Biblioteca Setorial',
+    'CEAGRI II / DC',
+    'DEAGRI',
+    'DMV',
+)
+
 @app.get('/api/pontos')
 def points():
     db=connection()
     try:
-        cur=db.cursor(dictionary=True);cur.execute('SELECT id,nome FROM pontos ORDER BY nome')
+        cur=db.cursor(dictionary=True)
+        # O catálogo oficial é definido pelo campus Recife; pontos antigos permanecem
+        # preservados no banco, mas não são oferecidos para novas configurações.
+        cur.execute('SELECT id,nome FROM pontos WHERE nome IN ('+
+                    ','.join(['%s']*len(PONTOS_CAMPUS))+') ORDER BY nome', PONTOS_CAMPUS)
         return answer({'pontos':rows(cur)})
     finally:db.close()
 
@@ -361,20 +376,24 @@ def offers():
     db=connection()
     try:
         cur=db.cursor(dictionary=True)
-        sql='''SELECT u.id AS vendedor_id,u.nome AS vendedor,v.whatsapp,p.nome AS ponto,
+        sql='''SELECT u.id AS vendedor_id,u.nome AS vendedor,
+                   COALESCE(NULLIF(nl.nome,''),u.nome) AS estabelecimento,
+                   v.whatsapp,p.nome AS ponto,
                   pr.id AS id,pr.nome,pr.descricao,pr.preco_centavos,
                   v.vendendo AS disponivel_agora
                FROM vendedores v JOIN usuarios u ON u.id=v.id_usuario
+               LEFT JOIN nomes_lojas nl ON nl.id_usuario=v.id_usuario
                JOIN pontos p ON p.id=v.id_ponto
                JOIN produtos pr ON pr.id_vendedor=u.id
-               WHERE v.vendendo=1 AND pr.disponivel=1'''
-        args=()
+               WHERE v.vendendo=1 AND pr.disponivel=1 AND pr.excluido_em IS NULL'''
+        sql+=' AND p.nome IN ('+','.join(['%s']*len(PONTOS_CAMPUS))+')'
+        args=tuple(PONTOS_CAMPUS)
         if point:
             if not point.isdigit():return fail('Ponto inválido.')
-            sql+=' AND p.id=%s';args=(int(point),)
+            sql+=' AND p.id=%s';args=args+(int(point),)
         cur.execute(sql+' ORDER BY p.nome,u.nome,pr.nome',args)
         result=rows(cur)
-        for item in result:item['foto_url']=photo_url('produto',item['id'])
+        for item in result:item['foto_url']=photo_url('produto',item['id'],db)
         return answer({'ofertas':result})
     finally:db.close()
 
@@ -384,9 +403,13 @@ def store():
     cur=g.db.cursor(dictionary=True)
     cur.execute('SELECT id_ponto,whatsapp,vendendo FROM vendedores WHERE id_usuario=%s',(g.user['id'],))
     loja=cur.fetchone()
-    cur.execute('SELECT id,nome,descricao,preco_centavos,disponivel FROM produtos WHERE id_vendedor=%s ORDER BY id DESC',(g.user['id'],))
+    cur.execute('SELECT nome FROM nomes_lojas WHERE id_usuario=%s',(g.user['id'],))
+    nome_loja=cur.fetchone()
+    if loja is not None:
+        loja['nome_estabelecimento']=nome_loja['nome'] if nome_loja else ''
+    cur.execute('SELECT id,nome,descricao,preco_centavos,disponivel FROM produtos WHERE id_vendedor=%s AND excluido_em IS NULL ORDER BY id DESC',(g.user['id'],))
     products=rows(cur)
-    for p in products:p['foto_url']=photo_url('produto',p['id'])
+    for p in products:p['foto_url']=photo_url('produto',p['id'],g.db)
     return answer({'loja':loja,'produtos':products})
 
 @app.post('/api/minha-loja')
@@ -394,12 +417,16 @@ def store():
 def set_store():
     d=request.get_json(silent=True) or {}
     pid=d.get('id_ponto');phone=re.sub(r'\D','',str(d.get('whatsapp','')))
+    nome_estabelecimento=str(d.get('nome_estabelecimento','')).strip()[:120]
     if not str(pid).isdigit():return fail('Escolha um ponto de venda.')
     if not 10<=len(phone)<=15:return fail('Informe o WhatsApp completo com DDI.')
     cur=g.db.cursor()
     cur.execute('SELECT id FROM pontos WHERE id=%s',(pid,))
     if not cur.fetchone():return fail('Ponto inexistente.')
     cur.execute('UPDATE vendedores SET id_ponto=%s,whatsapp=%s,vendendo=%s WHERE id_usuario=%s',(pid,phone,int(bool(d.get('vendendo'))),g.user['id']))
+    if 'nome_estabelecimento' in d:
+        cur.execute('''INSERT INTO nomes_lojas (id_usuario,nome) VALUES (%s,%s)
+            ON DUPLICATE KEY UPDATE nome=VALUES(nome)''',(g.user['id'],nome_estabelecimento))
     g.db.commit();return answer({'ok':True})
 
 @app.post('/api/produtos')
@@ -418,7 +445,7 @@ def add_product():
 def edit_product(pid):
     d=request.get_json(silent=True) or {}
     cur=g.db.cursor(dictionary=True)
-    cur.execute('SELECT * FROM produtos WHERE id=%s AND id_vendedor=%s',(pid,g.user['id']))
+    cur.execute('SELECT * FROM produtos WHERE id=%s AND id_vendedor=%s AND excluido_em IS NULL',(pid,g.user['id']))
     old=cur.fetchone()
     if not old:return fail('Produto não encontrado.',404)
     nome=str(d.get('nome',old['nome'])).strip();desc=str(d.get('descricao',old['descricao'])).strip()
@@ -432,10 +459,17 @@ def edit_product(pid):
 @app.delete('/api/produtos/<int:pid>')
 @logged
 def delete_product(pid):
+    """Exclusão lógica: preserva o histórico de pedidos e retira da loja/vitrine."""
     cur=g.db.cursor()
-    cur.execute('''UPDATE produtos SET disponivel=0 WHERE id=%s AND id_vendedor=%s''',(pid,g.user['id']))
-    if cur.rowcount==0:return fail('Produto não encontrado.',404)
-    g.db.commit();return answer({'ok':True})
+    cur.execute("""UPDATE produtos SET disponivel=0,excluido_em=UTC_TIMESTAMP()
+        WHERE id=%s AND id_vendedor=%s AND excluido_em IS NULL""",(pid,g.user['id']))
+    if cur.rowcount==0:
+        # Repetir a exclusão retorna sucesso somente se o item já pertenceu à conta.
+        cur.execute('SELECT id FROM produtos WHERE id=%s AND id_vendedor=%s',
+                    (pid,g.user['id']))
+        if not cur.fetchone():return fail('Produto não encontrado.',404)
+    g.db.commit()
+    return answer({'ok':True})
 
 @app.post('/api/pedidos')
 @logged
@@ -456,7 +490,7 @@ def checkout():
         cur.execute(f'''SELECT pr.id,pr.nome,pr.preco_centavos,pr.id_vendedor,u.nome AS vendedor,
                    v.whatsapp,p.nome AS ponto FROM produtos pr JOIN vendedores v ON v.id_usuario=pr.id_vendedor
                    JOIN usuarios u ON u.id=pr.id_vendedor JOIN pontos p ON p.id=v.id_ponto
-                   WHERE pr.id IN ({marks}) AND pr.disponivel=1 AND v.vendendo=1 FOR UPDATE''',tuple(ids))
+                   WHERE pr.id IN ({marks}) AND pr.disponivel=1 AND pr.excluido_em IS NULL AND v.vendendo=1 FOR UPDATE''',tuple(ids))
         products=cur.fetchall()
         if len(products)!=len(ids):return fail('Há produtos indisponíveis. Atualize o carrinho.')
         sellers={p['id_vendedor'] for p in products}
@@ -486,59 +520,210 @@ def forwarded(pid):
 @app.get('/api/pedidos')
 @logged
 def orders():
+    '''Numeração amigável por conta, independente da chave interna do banco.
+
+    A numeração é crescente por ordem de criação e estável com novos pedidos.
+    O limite de 100 retorna os pedidos recentes sem redefinir a numeração.
+    '''
     cur=g.db.cursor(dictionary=True)
-    cur.execute('''SELECT p.id,p.valor_centavos,p.status,p.criado_em,u.nome AS outra_pessoa,
-        CASE WHEN p.id_comprador=%s THEN 'compra' ELSE 'venda' END AS tipo
-        FROM pedidos p JOIN usuarios u ON u.id=CASE WHEN p.id_comprador=%s THEN p.id_vendedor ELSE p.id_comprador END
-        WHERE p.id_comprador=%s OR p.id_vendedor=%s ORDER BY p.id DESC LIMIT 50''',(g.user['id'],g.user['id'],g.user['id'],g.user['id']))
+    cur.execute('''SELECT * FROM (
+        SELECT p.id,p.valor_centavos,p.status,p.criado_em,u.nome AS outra_pessoa,
+        CASE WHEN p.id_comprador=%s THEN 'compra' ELSE 'venda' END AS tipo,
+        ROW_NUMBER() OVER (ORDER BY p.id ASC) AS numero_exibicao
+        FROM pedidos p
+        JOIN usuarios u ON u.id=CASE WHEN p.id_comprador=%s THEN p.id_vendedor ELSE p.id_comprador END
+        WHERE p.id_comprador=%s OR p.id_vendedor=%s
+    ) numerados ORDER BY id DESC LIMIT 100''',
+       (g.user['id'],g.user['id'],g.user['id'],g.user['id']))
     result=rows(cur)
-    for r in result:r['criado_em']=r['criado_em'].isoformat()
+    for record in result:
+        record['criado_em']=record['criado_em'].isoformat() if record.get('criado_em') else None
+        record['numero_exibicao']=int(record['numero_exibicao'])
+    result.sort(key=lambda record:int(record['numero_exibicao']))
     return answer({'pedidos':result})
 
 
-# Fotos opcionais do protótipo. Arquivos ficam no servidor, não no telefone.
-MEDIA_DIR=Path(__file__).with_name('uploads')
-MEDIA_DIR.mkdir(exist_ok=True)
+@app.get('/api/pedidos/<int:pid>')
+@logged
+def order_details(pid):
+    '''Somente comprador ou vendedor podem consultar itens e avaliação.'''
+    cur=g.db.cursor(dictionary=True)
+    cur.execute('''SELECT p.id,p.id_comprador,p.id_vendedor,p.status,p.valor_centavos,p.criado_em,
+        c.nome AS comprador_nome,v.nome AS vendedor_nome,
+        po.nome AS ponto
+        FROM pedidos p
+        JOIN usuarios c ON c.id=p.id_comprador
+        JOIN usuarios v ON v.id=p.id_vendedor
+        LEFT JOIN vendedores ve ON ve.id_usuario=p.id_vendedor
+        LEFT JOIN pontos po ON po.id=ve.id_ponto
+        WHERE p.id=%s AND (p.id_comprador=%s OR p.id_vendedor=%s)''',
+        (pid,g.user['id'],g.user['id']))
+    pedido=cur.fetchone()
+    if not pedido:return fail('Pedido não encontrado ou sem permissão.',404)
+    cur.execute('''SELECT i.id_produto,pr.nome, i.quantidade,
+        i.preco_unitario_centavos,i.subtotal_centavos
+        FROM itens_pedido i JOIN produtos pr ON pr.id=i.id_produto
+        WHERE i.id_pedido=%s ORDER BY i.id_produto''',(pid,))
+    itens=cur.fetchall()
+    cur.execute('''SELECT nota,comentario,criado_em FROM avaliacoes_pedidos
+        WHERE id_pedido=%s''',(pid,))
+    avaliacao=cur.fetchone()
+    if avaliacao and avaliacao.get('criado_em'):
+        avaliacao['criado_em']=avaliacao['criado_em'].isoformat()
+    if pedido.get('criado_em'):pedido['criado_em']=pedido['criado_em'].isoformat()
+    cur.execute('''SELECT COUNT(*) AS numero FROM pedidos WHERE id<=%s
+        AND (id_comprador=%s OR id_vendedor=%s)''',
+        (pid,g.user['id'],g.user['id']))
+    pedido['numero_exibicao']=int(cur.fetchone()['numero'])
+    pedido['tipo']='compra' if pedido['id_comprador']==g.user['id'] else 'venda'
+    pedido['itens']=itens
+    pedido['avaliacao']=avaliacao
+    return answer({'pedido':pedido})
 
-def photo_url(kind,item_id):
-    path=photo_path(kind,item_id)
-    return f'/api/fotos/{kind}/{int(item_id)}' if path.is_file() else None
+
+@app.post('/api/pedidos/<int:pid>/atendido')
+@logged
+def mark_attended(pid):
+    '''Vendedor informa que atendeu; ainda não é conclusão pelo comprador.'''
+    cur=g.db.cursor(dictionary=True)
+    cur.execute('SELECT id_vendedor,status FROM pedidos WHERE id=%s FOR UPDATE',(pid,))
+    pedido=cur.fetchone()
+    if not pedido or pedido['id_vendedor']!=g.user['id']:
+        return fail('Pedido não encontrado ou sem permissão.',404)
+    if pedido['status']=='ATENDIDO':return answer({'ok':True,'status':'ATENDIDO'})
+    if pedido['status']=='CONCLUIDO':return fail('Pedido já concluído.',409)
+    if pedido['status'] not in ('INICIADO','ENCAMINHAMENTO_TENTADO'):
+        return fail('Este pedido não pode ser marcado como atendido.',409)
+    cur.execute('UPDATE pedidos SET status=%s WHERE id=%s',('ATENDIDO',pid))
+    g.db.commit()
+    return answer({'ok':True,'status':'ATENDIDO'})
+
+
+@app.post('/api/pedidos/<int:pid>/concluir')
+@logged
+def confirm_received(pid):
+    '''Apenas o comprador confirma o recebimento e finaliza o pedido.'''
+    cur=g.db.cursor(dictionary=True)
+    cur.execute('SELECT id_comprador,status FROM pedidos WHERE id=%s FOR UPDATE',(pid,))
+    pedido=cur.fetchone()
+    if not pedido or pedido['id_comprador']!=g.user['id']:
+        return fail('Pedido não encontrado ou sem permissão.',404)
+    if pedido['status']=='CONCLUIDO':return answer({'ok':True,'status':'CONCLUIDO'})
+    if pedido['status']!='ATENDIDO':
+        return fail('O vendedor precisa marcar o pedido como atendido antes da confirmação.',409)
+    cur.execute('UPDATE pedidos SET status=%s WHERE id=%s',('CONCLUIDO',pid))
+    g.db.commit()
+    return answer({'ok':True,'status':'CONCLUIDO'})
+
+
+@app.post('/api/pedidos/<int:pid>/avaliacao')
+@logged
+def rate_order(pid):
+    '''Uma avaliação de 1 a 5 estrelas por pedido concluído, opcional.'''
+    data=request.get_json(silent=True) or {}
+    try:
+        nota=int(data.get('nota'))
+    except (ValueError,TypeError):return fail('Escolha uma nota de 1 a 5.',400)
+    comentario=str(data.get('comentario') or '').strip()
+    if not 1<=nota<=5:return fail('Escolha uma nota de 1 a 5.',400)
+    if len(comentario)>500:return fail('Comentário deve ter até 500 caracteres.',400)
+    cur=g.db.cursor(dictionary=True)
+    cur.execute('SELECT id_comprador,status FROM pedidos WHERE id=%s',(pid,))
+    pedido=cur.fetchone()
+    if not pedido or pedido['id_comprador']!=g.user['id']:
+        return fail('Pedido não encontrado ou sem permissão.',404)
+    if pedido['status']!='CONCLUIDO':
+        return fail('A avaliação só fica disponível após a conclusão do pedido.',409)
+    try:
+        cur.execute('''INSERT INTO avaliacoes_pedidos(id_pedido,id_comprador,nota,comentario)
+            VALUES (%s,%s,%s,%s)''',(pid,g.user['id'],nota,comentario))
+        g.db.commit()
+    except mysql.connector.IntegrityError:
+        g.db.rollback()
+        return fail('Este pedido já foi avaliado.',409)
+    return answer({'ok':True,'nota':nota},201)
+
+
+@app.get('/api/pedidos/<int:pid>/contato')
+@logged
+def order_contact(pid):
+    """Reabrir WhatsApp sem criar outro pedido; só comprador do pedido."""
+    cur=g.db.cursor(dictionary=True)
+    cur.execute('''SELECT p.id, p.valor_centavos, v.whatsapp, po.nome AS ponto
+        FROM pedidos p
+        JOIN vendedores v ON v.id_usuario=p.id_vendedor
+        LEFT JOIN pontos po ON po.id=v.id_ponto
+        WHERE p.id=%s AND p.id_comprador=%s''', (pid,g.user['id']))
+    order=cur.fetchone()
+    if not order:return fail('Solicitação não encontrada.',404)
+    if not order['whatsapp']:return fail('O vendedor ainda não informou um WhatsApp.',409)
+    cur.execute('''SELECT i.quantidade, i.subtotal_centavos, pr.nome
+        FROM itens_pedido i JOIN produtos pr ON pr.id=i.id_produto
+        WHERE i.id_pedido=%s ORDER BY i.id_produto''',(pid,))
+    lines=[f"{i['quantidade']}x {i['nome']} - R$ {i['subtotal_centavos']/100:.2f}"
+           for i in cur.fetchall()]
+    msg=(f"Olá! Gostaria de confirmar minha solicitação VôLanchar nº {pid}:\n"+
+         '\n'.join(lines)+f"\nTotal: R$ {order['valor_centavos']/100:.2f}\n"+
+         f"Retirada: {order['ponto'] or 'combinar com vendedor'}\nPodemos confirmar?")
+    return answer({'id_pedido':pid, 'whatsapp':order['whatsapp'], 'mensagem':msg})
+
+
+# Imagens no banco compatível com MySQL/TiDB. O sistema de arquivos do Render Free
+# não é persistente; antes de ativar, aplicar backend/migracao.sql.
+def photo_url(kind,item_id,db=None):
+    own_connection=db is None
+    db=db or connection()
+    try:
+        cur=db.cursor()
+        cur.execute('SELECT 1 FROM fotos WHERE tipo=%s AND id_item=%s LIMIT 1',
+                    (kind,int(item_id)))
+        return f'/api/fotos/{kind}/{int(item_id)}' if cur.fetchone() else None
+    finally:
+        if own_connection:db.close()
 
 def save_photo(kind,item_id):
     data=request.get_json(silent=True) or {}
     try: image=base64.b64decode(data.get('imagem_base64',''),validate=True)
     except (binascii.Error,ValueError):return fail('Imagem inválida.')
-    if len(image)>1_500_000:return fail('A imagem deve ter no máximo 1,5 MB.',413)
-    if not (image.startswith(b'\xff\xd8\xff') or image.startswith(b'\x89PNG\r\n\x1a\n')):
-        return fail('Envie uma imagem JPG ou PNG.')
-    ext='.png' if image.startswith(b'\x89PNG') else '.jpg'
-    path=MEDIA_DIR / f'{kind}_{int(item_id)}{ext}'
-    tmp=path.with_suffix(path.suffix+'.tmp')
-    tmp.write_bytes(image);tmp.replace(path)
-    other=MEDIA_DIR / f'{kind}_{int(item_id)}{".jpg" if ext==".png" else ".png"}'
-    if other.is_file():other.unlink()
+    if not image or len(image)>1_500_000:
+        return fail('A imagem deve ter no máximo 1,5 MB.',413)
+    is_png=image.startswith(b'\x89PNG\r\n\x1a\n')
+    is_jpeg=image.startswith(b'\xff\xd8\xff')
+    if not (is_png or is_jpeg):return fail('Envie imagem JPG ou PNG.')
+    mime='image/png' if is_png else 'image/jpeg'
+    db=connection()
+    try:
+        cur=db.cursor()
+        cur.execute('''INSERT INTO fotos (tipo,id_item,mime,conteudo)
+            VALUES (%s,%s,%s,%s)
+            ON DUPLICATE KEY UPDATE mime=VALUES(mime),conteudo=VALUES(conteudo)''',
+            (kind,int(item_id),mime,image))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally: db.close()
     return answer({'ok':True,'foto_url':f'/api/fotos/{kind}/{int(item_id)}'})
-
-# Revê JPG e PNG separadamente, para manter o nome da URL independente da extensão.
-def photo_path(kind,item_id):
-    for ext in ('.jpg','.png'):
-        path=MEDIA_DIR / f'{kind}_{int(item_id)}{ext}'
-        if path.is_file():return path
-    return MEDIA_DIR / f'{kind}_{int(item_id)}.jpg'
 
 @app.get('/api/fotos/<kind>/<int:item_id>')
 def show_photo(kind,item_id):
     if kind not in ('perfil','produto'):abort(404)
-    path=photo_path(kind,item_id)
-    if not path.is_file():abort(404)
-    return send_file(path,mimetype='image/png' if path.suffix=='.png' else 'image/jpeg',max_age=120)
+    db=connection()
+    try:
+        cur=db.cursor(dictionary=True)
+        cur.execute('SELECT mime,conteudo FROM fotos WHERE tipo=%s AND id_item=%s',
+                    (kind,item_id))
+        entry=cur.fetchone()
+    finally:db.close()
+    if not entry:abort(404)
+    return send_file(BytesIO(bytes(entry['conteudo'])),mimetype=entry['mime'],max_age=120)
 
 @app.get('/api/perfil')
 @logged
 def profile():
     u=g.user
     return answer({'usuario':{'id':u['id'],'nome':u['nome'],'email':u['email'],
-       'telefone':u['telefone'],'foto_url':photo_url('perfil',u['id'])}})
+       'telefone':u['telefone'],'foto_url':photo_url('perfil',u['id'],g.db)}})
 
 @app.patch('/api/perfil')
 @logged
@@ -601,15 +786,17 @@ def delete_profile():
             cur.execute(f'DELETE FROM pedidos WHERE id IN ({markers})',tuple(order_ids))
         cur.execute('SELECT id FROM produtos WHERE id_vendedor=%s',(uid,))
         product_ids=[row['id'] for row in cur.fetchall()]
+        # Excluir fotos na mesma transação, evitando dados órfãos após remoção da conta.
+        cur.execute('DELETE FROM fotos WHERE tipo=%s AND id_item=%s',('perfil',uid))
+        if product_ids:
+            placeholders=','.join(['%s']*len(product_ids))
+            cur.execute('DELETE FROM fotos WHERE tipo=%s AND id_item IN ('+placeholders+')',
+                        ('produto',*product_ids))
         cur.execute('DELETE FROM produtos WHERE id_vendedor=%s',(uid,))
         cur.execute('DELETE FROM usuarios WHERE id=%s',(uid,))
         db.commit()
     except Exception:
         db.rollback();raise
-    for kind, ids in (('perfil',[uid]),('produto',product_ids)):
-        for item_id in ids:
-            for ext in ('.jpg','.png'):
-                (MEDIA_DIR / f'{kind}_{item_id}{ext}').unlink(missing_ok=True)
     return answer({'ok':True})
 
 if __name__=='__main__':
